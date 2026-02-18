@@ -356,19 +356,23 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 			IrisRenderSystem.setActiveUniformBuffer(irisUniformBuffer);
 		}
 
-		if (lastApplied != this) {
-			lastApplied = this;
-			ProgramManager.glUseProgram(this.getId());
-		}
+		// Skip program binding and texture binding in uniformsOnlyMode —
+		// textures may not be set during sky phase and would cause NPE
+		if (!uniformsOnlyMode) {
+			if (lastApplied != this) {
+				lastApplied = this;
+				ProgramManager.glUseProgram(this.getId());
+			}
 
-		if (intensitySwizzle) {
-			IrisRenderSystem.texParameteriv(RenderSystem.getShaderTexture(0), TextureType.TEXTURE_2D.getGlType(), GL_TEXTURE_SWIZZLE_RGBA,
-				new int[]{GL_RED, GL_RED, GL_RED, GL_RED});
-		}
+			if (intensitySwizzle) {
+				IrisRenderSystem.texParameteriv(RenderSystem.getShaderTexture(0), TextureType.TEXTURE_2D.getGlType(), GL_TEXTURE_SWIZZLE_RGBA,
+					new int[]{GL_RED, GL_RED, GL_RED, GL_RED});
+			}
 
-		IrisRenderSystem.bindTextureToUnit(TextureType.TEXTURE_2D.getGlType(), IrisSamplers.ALBEDO_TEXTURE_UNIT, RenderSystem.getShaderTexture(0));
-		IrisRenderSystem.bindTextureToUnit(TextureType.TEXTURE_2D.getGlType(), IrisSamplers.OVERLAY_TEXTURE_UNIT, RenderSystem.getShaderTexture(1));
-		IrisRenderSystem.bindTextureToUnit(TextureType.TEXTURE_2D.getGlType(), IrisSamplers.LIGHTMAP_TEXTURE_UNIT, RenderSystem.getShaderTexture(2));
+			IrisRenderSystem.bindTextureToUnit(TextureType.TEXTURE_2D.getGlType(), IrisSamplers.ALBEDO_TEXTURE_UNIT, RenderSystem.getShaderTexture(0));
+			IrisRenderSystem.bindTextureToUnit(TextureType.TEXTURE_2D.getGlType(), IrisSamplers.OVERLAY_TEXTURE_UNIT, RenderSystem.getShaderTexture(1));
+			IrisRenderSystem.bindTextureToUnit(TextureType.TEXTURE_2D.getGlType(), IrisSamplers.LIGHTMAP_TEXTURE_UNIT, RenderSystem.getShaderTexture(2));
+		}
 
 		ImmediateState.usingTessellation = usesTessellation;
 
@@ -433,7 +437,10 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 			uploadIfNotNull(uniform);
 		}
 
-		samplers.update();
+		// Skip sampler/image binding in uniformsOnlyMode — textures may not be available
+		if (!uniformsOnlyMode) {
+			samplers.update();
+		}
 
 		// This calls Iris Uniform.update() which now writes to the active buffer
 		// via IrisRenderSystem.uniform*() methods
@@ -441,7 +448,9 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 
 		customUniforms.push(this);
 
-		images.update();
+		if (!uniformsOnlyMode) {
+			images.update();
+		}
 
 		// Phase 7: Update ManualUBO source pointer so VulkanMod copies our data at draw time
 		if (irisManualUBO != null && irisUniformBuffer != null) {
