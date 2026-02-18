@@ -101,33 +101,13 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 	private int irisProgramId;
 	private List<IrisSPIRVCompiler.UniformField> sharedUniforms;
 
-	private static int diagMatrixDumpCount = 0;
-	private static final int DIAG_MATRIX_DUMP_MAX = 5;
-	private static int diagUboReadbackCount = 0;
-	private static final int DIAG_UBO_READBACK_MAX = 5;
-
-	// Debug: selectively skip draws to isolate artifact source.
-	// Set to true to disable that draw category. Rebuild and test.
-	private static final boolean SKIP_ENTITIES = false;         // ALL entities_*, block_entity_*
-	private static final boolean SKIP_SHADOW_ENTITIES = false;  // shadow_entities_* only
-	private static final boolean SKIP_MAIN_ENTITIES = false;    // main-pass entities_*, block_entity_* (not shadow)
-	private static final boolean SKIP_HAND = false;              // hand_*
-	private static final boolean SKIP_LINES = false;            // lines
-	private static final boolean SKIP_PARTICLES = false;        // particles
-	// Diagnostic: override entity fragment output with flat red color.
-	// If radiating lines are red → vertex geometry is wrong.
-	// If red entities appear correctly → fragment lighting/shadows are wrong.
-	private static final boolean DIAG_FLAT_COLOR = false;
-	// Diagnostic: bypass ALL matrix math in entity vertex shader.
-	// Replaces ftransform() result with simple gl_Position = vec4(iris_Position * scale, 1.0).
-	// If entities render as small correct shapes near screen center → vertex data is correct,
-	// problem is in UBO/matrix pipeline. If still flat panes → vertex data or pipeline is wrong.
-	private static final boolean DIAG_SIMPLE_TRANSFORM = false;
-	// Diagnostic: bypass VK→GL depth conversion AND depth patch.
-	// Keeps iris_ProjMat in Vulkan [0,1] depth, matching VulkanMod's built-in MVP behavior.
-	// If pane artifacts disappear → the GL depth roundtrip is the bug.
-	// If pane artifacts persist → the problem is elsewhere (UBO, SPIR-V, etc.)
+	// Keep iris_ProjMat in Vulkan [0,1] depth, matching VulkanMod's built-in MVP behavior.
+	// The depth patch (GL→VK conversion in vertex shader) is skipped when true.
 	private static final boolean DIAG_VK_DEPTH_BYPASS = true;
+
+	// When true, apply() skips framebuffer binding, blend mode, and pipeline binding.
+	// Used by updateUniformsOnly() to populate the UBO without render pass side effects.
+	private boolean uniformsOnlyMode = false;
 
 	public ExtendedShader(ResourceProvider resourceFactory, String string, VertexFormat vertexFormat, boolean usesTessellation,
 						  GlFramebuffer writingToBeforeTranslucent, GlFramebuffer writingToAfterTranslucent,
@@ -182,31 +162,6 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 
 			Iris.logger.debug("Registered IrisUniformBuffer for {} with {} fields, {} bytes, {} samplers",
 				string, irisUniformBuffer.getFields().size(), irisUniformBuffer.getUsedSize(), samplerNames.size());
-
-			// DIAGNOSTIC: Dump complete UBO field map for entity shaders
-			// This lets us verify std140 offsets match the compiled SPIR-V shader
-			if (string.contains("entities") || string.contains("block_entity") || string.contains("hand")) {
-				Iris.logger.info("[UBO_LAYOUT_DIAG] Field map for shader '{}':\n{}", string, irisUniformBuffer.dumpFieldMap());
-				// Highlight the critical fields
-				int mvOff = irisUniformBuffer.getFieldOffset("iris_ModelViewMat");
-				int projOff = irisUniformBuffer.getFieldOffset("iris_ProjMat");
-				int chunkOff = irisUniformBuffer.getFieldOffset("iris_ChunkOffset");
-				int normOff = irisUniformBuffer.getFieldOffset("iris_NormalMat");
-				int texMatOff = irisUniformBuffer.getFieldOffset("iris_TextureMat");
-				int colorModOff = irisUniformBuffer.getFieldOffset("iris_ColorModulator");
-				int gbufMvOff = irisUniformBuffer.getFieldOffset("gbufferModelView");
-				int gbufProjOff = irisUniformBuffer.getFieldOffset("gbufferProjection");
-				Iris.logger.info("[UBO_LAYOUT_DIAG] Critical offsets for '{}':\n" +
-					"  iris_ModelViewMat     = {} (expected ~368)\n" +
-					"  iris_ProjMat          = {} (expected 0)\n" +
-					"  iris_NormalMat        = {} (expected ~192)\n" +
-					"  iris_TextureMat       = {} (expected ~304)\n" +
-					"  iris_ColorModulator   = {} (expected ~432)\n" +
-					"  iris_ChunkOffset      = {}\n" +
-					"  gbufferModelView      = {}\n" +
-					"  gbufferProjection     = {}",
-					string, mvOff, projOff, normOff, texMatOff, colorModOff, chunkOff, gbufMvOff, gbufProjOff);
-			}
 		}
 
 		// Use irisProgramId for BOTH uniform and sampler location lookups
@@ -471,103 +426,6 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 		// (VulkanMod's UniformM cancels Uniform.upload(), so we write manually)
 		if (irisUniformBuffer != null) {
 			writeMcUniformsToBuffer();
-
-			// DIAGNOSTIC: Dump ModelView and Projection matrices for entity shaders
-			String diagName = getName();
-			if (diagName != null && !diagName.contains("shadow")
-				&& (diagName.contains("entities") || diagName.contains("block_entity"))
-				&& diagMatrixDumpCount < DIAG_MATRIX_DUMP_MAX) {
-				diagMatrixDumpCount++;
-				StringBuilder sb = new StringBuilder();
-				sb.append(String.format("[MATRIX_DIAG] shader='%s'\n", diagName));
-				if (MODEL_VIEW_MATRIX != null) {
-					java.nio.FloatBuffer mvBuf = MODEL_VIEW_MATRIX.getFloatBuffer();
-					sb.append("  ModelViewMat (col-major):\n");
-					sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", mvBuf.get(0), mvBuf.get(4), mvBuf.get(8), mvBuf.get(12)));
-					sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", mvBuf.get(1), mvBuf.get(5), mvBuf.get(9), mvBuf.get(13)));
-					sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", mvBuf.get(2), mvBuf.get(6), mvBuf.get(10), mvBuf.get(14)));
-					sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", mvBuf.get(3), mvBuf.get(7), mvBuf.get(11), mvBuf.get(15)));
-				} else {
-					sb.append("  ModelViewMat: NULL\n");
-				}
-				if (PROJECTION_MATRIX != null) {
-					java.nio.FloatBuffer projBuf = PROJECTION_MATRIX.getFloatBuffer();
-					sb.append("  ProjMat (col-major, after VK→GL fix):\n");
-					sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", projBuf.get(0), projBuf.get(4), projBuf.get(8), projBuf.get(12)));
-					sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", projBuf.get(1), projBuf.get(5), projBuf.get(9), projBuf.get(13)));
-					sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", projBuf.get(2), projBuf.get(6), projBuf.get(10), projBuf.get(14)));
-					sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", projBuf.get(3), projBuf.get(7), projBuf.get(11), projBuf.get(15)));
-				} else {
-					sb.append("  ProjMat: NULL\n");
-				}
-				// Also dump RenderSystem's raw matrices for comparison
-				org.joml.Matrix4f rawMV = RenderSystem.getModelViewMatrix();
-				sb.append(String.format("  RenderSystem MV: [%.4f %.4f %.4f %.4f / %.4f %.4f %.4f %.4f / %.4f %.4f %.4f %.4f / %.4f %.4f %.4f %.4f]\n",
-					rawMV.m00(), rawMV.m01(), rawMV.m02(), rawMV.m03(),
-					rawMV.m10(), rawMV.m11(), rawMV.m12(), rawMV.m13(),
-					rawMV.m20(), rawMV.m21(), rawMV.m22(), rawMV.m23(),
-					rawMV.m30(), rawMV.m31(), rawMV.m32(), rawMV.m33()));
-
-				// Compare VulkanMod's MVP with iris_ProjMat * iris_ModelViewMat
-				try {
-					java.nio.FloatBuffer mvpBuf = VRenderSystem.getMVP().buffer.asFloatBuffer();
-					float[] mvpVk = new float[16];
-					for (int fi = 0; fi < 16; fi++) mvpVk[fi] = mvpBuf.get(fi);
-					sb.append(String.format("  VRenderSystem MVP (col-major, Vulkan depth):\n"));
-					sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", mvpVk[0], mvpVk[4], mvpVk[8], mvpVk[12]));
-					sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", mvpVk[1], mvpVk[5], mvpVk[9], mvpVk[13]));
-					sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", mvpVk[2], mvpVk[6], mvpVk[10], mvpVk[14]));
-					sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", mvpVk[3], mvpVk[7], mvpVk[11], mvpVk[15]));
-
-					// Compute iris product: iris_ProjMat * iris_ModelViewMat
-					if (PROJECTION_MATRIX != null && MODEL_VIEW_MATRIX != null) {
-						org.joml.Matrix4f irisP = new org.joml.Matrix4f();
-						irisP.set(PROJECTION_MATRIX.getFloatBuffer());
-						org.joml.Matrix4f irisMV = new org.joml.Matrix4f();
-						irisMV.set(MODEL_VIEW_MATRIX.getFloatBuffer());
-						org.joml.Matrix4f irisProduct = new org.joml.Matrix4f(irisP).mul(irisMV);
-						float[] ipf = new float[16];
-						irisProduct.get(ipf);
-						sb.append("  iris_ProjMat * iris_ModelViewMat (GL depth):\n");
-						sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", ipf[0], ipf[4], ipf[8], ipf[12]));
-						sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", ipf[1], ipf[5], ipf[9], ipf[13]));
-						sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", ipf[2], ipf[6], ipf[10], ipf[14]));
-						sb.append(String.format("    [%.4f %.4f %.4f %.4f]\n", ipf[3], ipf[7], ipf[11], ipf[15]));
-
-						// Check if rows 0,1 match (depth-independent)
-						float maxDiff = 0;
-						for (int fi = 0; fi < 16; fi++) {
-							int row = fi % 4;
-							if (row < 2) { // Only compare rows 0 and 1 (depth-independent)
-								float diff = Math.abs(ipf[fi] - mvpVk[fi]);
-								if (diff > maxDiff) maxDiff = diff;
-							}
-						}
-						sb.append(String.format("  Max diff (rows 0,1): %.6f %s\n", maxDiff, maxDiff > 0.01f ? "*** MISMATCH ***" : "(OK)"));
-					}
-				} catch (Exception e) {
-					sb.append("  MVP comparison failed: " + e.getMessage() + "\n");
-				}
-				Iris.logger.info(sb.toString());
-			}
-
-			// Debug: skip specific draw types by zeroing projection matrix in UBO
-			if (SKIP_ENTITIES || SKIP_SHADOW_ENTITIES || SKIP_MAIN_ENTITIES || SKIP_HAND || SKIP_LINES || SKIP_PARTICLES) {
-				String skipName = getName();
-				boolean shouldSkip = false;
-				if (SKIP_ENTITIES && skipName != null && (skipName.contains("entities") || skipName.contains("block_entity"))) shouldSkip = true;
-				if (SKIP_SHADOW_ENTITIES && skipName != null && skipName.contains("shadow_entities")) shouldSkip = true;
-				if (SKIP_MAIN_ENTITIES && skipName != null && !skipName.contains("shadow") && (skipName.contains("entities") || skipName.contains("block_entity"))) shouldSkip = true;
-				if (SKIP_HAND && skipName != null && skipName.contains("hand")) shouldSkip = true;
-				if (SKIP_LINES && skipName != null && skipName.equals("lines")) shouldSkip = true;
-				if (SKIP_PARTICLES && skipName != null && skipName.equals("particles")) shouldSkip = true;
-				if (shouldSkip) {
-					int pOff = irisUniformBuffer.getFieldOffset("iris_ProjMat");
-					if (pOff >= 0) {
-						irisUniformBuffer.writeMat4f(pOff, new float[16]);
-					}
-				}
-			}
 		}
 
 		List<Uniform> uniformList = super.uniforms;
@@ -585,117 +443,25 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 
 		images.update();
 
-		// DIAGNOSTIC: Read back matrices AFTER uniforms.update() + customUniforms.push()
-		// to detect if Iris uniform callbacks or custom uniforms overwrote our matrices.
-		// This is the FINAL state before ManualUBO copies the buffer to GPU.
-		if (irisUniformBuffer != null) {
-			String diagName2 = getName();
-			if (diagName2 != null && diagName2.contains("entities") && diagUboReadbackCount < DIAG_UBO_READBACK_MAX) {
-				diagUboReadbackCount++;
-				StringBuilder rb = new StringBuilder();
-				rb.append(String.format("[UBO_FINAL_DIAG] FINAL buffer state for '%s' (after uniforms.update + customUniforms.push):\n", diagName2));
-
-				// Read back iris_ModelViewMat
-				int mvOff = irisUniformBuffer.getFieldOffset("iris_ModelViewMat");
-				float[] mvData = irisUniformBuffer.readbackMat4f(mvOff);
-				if (mvData != null) {
-					rb.append(String.format("  iris_ModelViewMat (offset=%d):\n", mvOff));
-					for (int row = 0; row < 4; row++) {
-						rb.append(String.format("    [%10.4f, %10.4f, %10.4f, %10.4f]\n",
-							mvData[row], mvData[row + 4], mvData[row + 8], mvData[row + 12]));
-					}
-					boolean allZero = true;
-					for (float v : mvData) if (v != 0.0f) { allZero = false; break; }
-					if (allZero) rb.append("  *** WARNING: iris_ModelViewMat is ALL ZEROS! ***\n");
-				} else {
-					rb.append(String.format("  iris_ModelViewMat: offset=%d INVALID\n", mvOff));
-				}
-
-				// Read back iris_ProjMat
-				int projOff = irisUniformBuffer.getFieldOffset("iris_ProjMat");
-				float[] projData = irisUniformBuffer.readbackMat4f(projOff);
-				if (projData != null) {
-					rb.append(String.format("  iris_ProjMat (offset=%d):\n", projOff));
-					for (int row = 0; row < 4; row++) {
-						rb.append(String.format("    [%10.4f, %10.4f, %10.4f, %10.4f]\n",
-							projData[row], projData[row + 4], projData[row + 8], projData[row + 12]));
-					}
-					boolean allZero = true;
-					for (float v : projData) if (v != 0.0f) { allZero = false; break; }
-					if (allZero) rb.append("  *** WARNING: iris_ProjMat is ALL ZEROS! ***\n");
-
-					// Verify key projection values
-					boolean hasInf = false, hasNaN = false;
-					for (float v : projData) {
-						if (Float.isInfinite(v)) hasInf = true;
-						if (Float.isNaN(v)) hasNaN = true;
-					}
-					if (hasInf) rb.append("  *** WARNING: iris_ProjMat contains INFINITY! ***\n");
-					if (hasNaN) rb.append("  *** WARNING: iris_ProjMat contains NaN! ***\n");
-				} else {
-					rb.append(String.format("  iris_ProjMat: offset=%d INVALID\n", projOff));
-				}
-
-				// Read back iris_ChunkOffset
-				int chunkOff = irisUniformBuffer.getFieldOffset("iris_ChunkOffset");
-				float[] chunkData = irisUniformBuffer.readbackVec3f(chunkOff);
-				if (chunkData != null) {
-					rb.append(String.format("  iris_ChunkOffset (offset=%d): [%.4f, %.4f, %.4f]",
-						chunkOff, chunkData[0], chunkData[1], chunkData[2]));
-					if (chunkData[0] != 0 || chunkData[1] != 0 || chunkData[2] != 0) {
-						rb.append(" *** WARNING: NOT ZERO! ***");
-					}
-					rb.append("\n");
-				}
-
-				// Read back iris_NormalMat (mat3 in std140 = 48 bytes, 3 columns @ 16-byte stride)
-				int normOff = irisUniformBuffer.getFieldOffset("iris_NormalMat");
-				if (normOff >= 0) {
-					float[] col0 = irisUniformBuffer.readbackVec3f(normOff);       // column 0
-					float[] col1 = irisUniformBuffer.readbackVec3f(normOff + 16);  // column 1
-					float[] col2 = irisUniformBuffer.readbackVec3f(normOff + 32);  // column 2
-					if (col0 != null && col1 != null && col2 != null) {
-						rb.append(String.format("  iris_NormalMat (offset=%d): col0=[%.3f,%.3f,%.3f] col1=[%.3f,%.3f,%.3f] col2=[%.3f,%.3f,%.3f]\n",
-							normOff, col0[0], col0[1], col0[2], col1[0], col1[1], col1[2], col2[0], col2[1], col2[2]));
-					}
-				}
-
-				// Read back gbufferModelView
-				int gbufMvOff = irisUniformBuffer.getFieldOffset("gbufferModelView");
-				float[] gbufMvData = irisUniformBuffer.readbackMat4f(gbufMvOff);
-				if (gbufMvData != null) {
-					rb.append(String.format("  gbufferModelView (offset=%d): [%.4f,%.4f,%.4f,%.4f / %.4f,%.4f,%.4f,%.4f / ...]\n",
-						gbufMvOff, gbufMvData[0], gbufMvData[1], gbufMvData[2], gbufMvData[3],
-						gbufMvData[4], gbufMvData[5], gbufMvData[6], gbufMvData[7]));
-				}
-
-				// Read back gbufferProjection
-				int gbufProjOff = irisUniformBuffer.getFieldOffset("gbufferProjection");
-				float[] gbufProjData = irisUniformBuffer.readbackMat4f(gbufProjOff);
-				if (gbufProjData != null) {
-					rb.append(String.format("  gbufferProjection (offset=%d): m00=%.4f m11=%.4f m22=%.4f m23=%.4f m32=%.4f m33=%.4f\n",
-						gbufProjOff, gbufProjData[0], gbufProjData[5], gbufProjData[10], gbufProjData[11], gbufProjData[14], gbufProjData[15]));
-				}
-
-				// Buffer pointer verification
-				rb.append(String.format("  Buffer: ptr=0x%X, usedSize=%d, bufferSize=%d\n",
-					irisUniformBuffer.getPointer(), irisUniformBuffer.getUsedSize(), irisUniformBuffer.getSize()));
-
-				Iris.logger.info(rb.toString());
-			}
-		}
-
 		// Phase 7: Update ManualUBO source pointer so VulkanMod copies our data at draw time
 		if (irisManualUBO != null && irisUniformBuffer != null) {
 			irisManualUBO.setSrc(irisUniformBuffer.getPointer(), irisUniformBuffer.getUsedSize());
 		}
 
-		if (this.blendModeOverride != null) {
-			this.blendModeOverride.apply();
-		}
+		// In uniformsOnlyMode (called from VBO.drawWithShader for sky rendering):
+		// - DO apply blend mode and bind gbuffer framebuffer so sky data reaches
+		//   the gbuffer for composite passes to read
+		// - SKIP pipeline binding because VBO.drawWithShader does its own pipeline
+		//   binding via renderer.bindGraphicsPipeline()
 
-		if (hasOverrides) {
-			bufferBlendOverrides.forEach(BufferBlendOverride::apply);
+		if (!uniformsOnlyMode) {
+			if (this.blendModeOverride != null) {
+				this.blendModeOverride.apply();
+			}
+
+			if (hasOverrides) {
+				bufferBlendOverrides.forEach(BufferBlendOverride::apply);
+			}
 		}
 
 		// Bind the gbuffer framebuffer, but skip if the same VulkanMod Framebuffer
@@ -714,6 +480,11 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 			// If same framebuffer is already bound, render pass stays active — zero cost
 		}
 
+		// Skip pipeline binding in uniformsOnlyMode — VBO.drawWithShader handles it
+		if (uniformsOnlyMode) {
+			return;
+		}
+
 		// Bind the Vulkan pipeline for entity/shader rendering.
 		// Without this, entities render with the default VulkanMod pipeline instead
 		// of the Iris shader pack pipeline, so they don't write to gbuffer correctly.
@@ -722,6 +493,21 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 			net.vulkanmod.vulkan.Renderer renderer = net.vulkanmod.vulkan.Renderer.getInstance();
 			renderer.bindGraphicsPipeline(vulkanPipeline);
 			renderer.uploadAndBindUBOs(vulkanPipeline);
+		}
+	}
+
+	/**
+	 * Updates only the UBO uniform data without binding framebuffers or pipelines.
+	 * Called from VBO.drawWithShader so that iris_ModelViewMat etc. reflect the
+	 * correct MV/P matrices during sky rendering, without disrupting the active
+	 * Vulkan render pass. Implements ShaderMixed.updateUniformsOnly().
+	 */
+	public void updateUniformsOnly() {
+		uniformsOnlyMode = true;
+		try {
+			apply();
+		} finally {
+			uniformsOnlyMode = false;
 		}
 	}
 
@@ -1171,8 +957,6 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 	private static final Pattern VERTEX_INPUT_PATTERN = Pattern.compile(
 		"^\\s*((?:(?:flat|smooth|noperspective)\\s+)*)in\\s+(\\w+)\\s+(\\w+)\\s*;");
 
-	private static int inputLocationLogCount = 0;
-
 	/**
 	 * Creates a VulkanMod GraphicsPipeline for this ExtendedShader.
 	 * Uses the shared uniform list (computed earlier in constructor) to ensure
@@ -1206,16 +990,6 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 			// near-plane clipping is wrong and causes vertex explosions for entities.
 			vshVulkan = patchVertexShaderDepthRange(vshVulkan);
 
-			// 2c. Diagnostic: bypass ALL shader pack vertex code with minimal MVP transform
-			if (DIAG_SIMPLE_TRANSFORM && (name.contains("entities") || name.contains("entity"))) {
-				vshVulkan = patchVertexShaderSimpleTransform(vshVulkan);
-			}
-
-			// 2d. Diagnostic: override entity fragment output with flat color
-			if (DIAG_FLAT_COLOR && name.contains("entities")) {
-				fshVulkan = patchFragmentShaderFlatColor(fshVulkan);
-			}
-
 			// 3. Collect all unique sampler names from both shaders (in declaration order)
 			List<String> allSamplers = new ArrayList<>();
 			collectSamplerNames(vshVulkan, allSamplers);
@@ -1245,11 +1019,6 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 			ByteBuffer vertSpirv = IrisSPIRVCompiler.compilePreprocessed(name + ".vsh", vshFinal, ShaderType.VERTEX);
 			ByteBuffer fragSpirv = IrisSPIRVCompiler.compilePreprocessed(name + ".fsh", fshFinal, ShaderType.FRAGMENT);
 
-			// 6b. DIAGNOSTIC: Parse SPIR-V to verify UBO layout matches our Java-computed offsets
-			if (irisUniformBuffer != null) {
-				verifySPIRVLayout(name + ".vsh", vertSpirv, irisUniformBuffer);
-			}
-
 			// 7. Wrap in VulkanMod SPIRV objects
 			SPIRVUtils.SPIRV vertSPIRV = new SPIRVUtils.SPIRV(0, vertSpirv);
 			SPIRVUtils.SPIRV fragSPIRV = new SPIRVUtils.SPIRV(0, fragSpirv);
@@ -1267,27 +1036,16 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 			this.irisManualUBO = new ManualUBO(0, vkShaderStageAllGraphics, uboSizeInWords);
 			if (irisUniformBuffer != null) {
 				this.irisManualUBO.setSrc(irisUniformBuffer.getPointer(), irisUniformBuffer.getUsedSize());
-				// Set diagnostic info so ManualUBO can verify matrices during update()
-				int mvOff = irisUniformBuffer.getFieldOffset("iris_ModelViewMat");
-				int projOff = irisUniformBuffer.getFieldOffset("iris_ProjMat");
-				this.irisManualUBO.setDiagInfo(name, mvOff, projOff);
-				Iris.logger.info("[UBO_SIZE_DIAG] ManualUBO for '{}': irisUsedSize={}, uboSizeInBytes={}, uboSizeInWords={}, manualUboAllocBytes={}",
-					name, irisUniformBuffer.getUsedSize(), uboSizeInBytes, uboSizeInWords, uboSizeInWords * 4);
 			}
 			ubos.add(this.irisManualUBO);
 
 			// Sampler ImageDescriptors at bindings 1, 2, 3...
-			StringBuilder samplerDiag = new StringBuilder();
-			samplerDiag.append("[ExtendedShader] Sampler mapping for '").append(name).append("':");
 			for (int i = 0; i < uniqueSamplers.size(); i++) {
 				String samplerName = uniqueSamplers.get(i);
-				boolean fromMap = samplerUnitMap.containsKey(samplerName);
-				int textureIdx = fromMap ? samplerUnitMap.get(samplerName) : mapSamplerToTextureIndex(samplerName);
+				int textureIdx = samplerUnitMap.containsKey(samplerName)
+					? samplerUnitMap.get(samplerName) : mapSamplerToTextureIndex(samplerName);
 				imageDescriptors.add(new ImageDescriptor(i + 1, "sampler2D", samplerName, textureIdx));
-				samplerDiag.append(String.format("\n  [binding=%d] %s -> texIdx=%d (%s)",
-					i + 1, samplerName, textureIdx, fromMap ? "samplerUnitMap" : "FALLBACK"));
 			}
-			Iris.logger.info(samplerDiag.toString());
 
 			// 9. Build the VulkanMod GraphicsPipeline
 			Pipeline.Builder builder = new Pipeline.Builder(vertexFormat, name);
@@ -1298,7 +1056,7 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 			// 10. Set pipeline on this shader instance (via VulkanMod's ShaderMixed mixin)
 			((ShaderMixed) (Object) this).setPipeline(pipeline);
 
-			Iris.logger.info("Created Vulkan pipeline for ExtendedShader: {} ({} samplers, {} UBO bytes)",
+			Iris.logger.debug("Created Vulkan pipeline for ExtendedShader: {} ({} samplers, {} UBO bytes)",
 				name, uniqueSamplers.size(), uboSizeInBytes);
 		} catch (Exception e) {
 			Iris.logger.error("Failed to create Vulkan pipeline for ExtendedShader '{}': {}", name, e.getMessage());
@@ -1315,7 +1073,7 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 					fallbackBuilder.compileShaders();
 					GraphicsPipeline fallbackPipeline = fallbackBuilder.createGraphicsPipeline();
 					((ShaderMixed) (Object) this).setPipeline(fallbackPipeline);
-					Iris.logger.info("Fell back to VulkanMod built-in pipeline for ExtendedShader '{}'", name);
+					Iris.logger.debug("Fell back to VulkanMod built-in pipeline for ExtendedShader '{}'", name);
 				} else {
 					Iris.logger.warn("No VulkanMod built-in pipeline available for fallback: '{}'", name);
 				}
@@ -1354,9 +1112,6 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 	 */
 	private static String patchVertexShaderDepthRange(String source) {
 		if (DIAG_VK_DEPTH_BYPASS) {
-			// VK depth bypass mode: iris_ProjMat stays in Vulkan [0,1] depth,
-			// so no depth conversion needed. Return source unmodified.
-			Iris.logger.info("[IrisVulkan] DIAG_VK_DEPTH_BYPASS: skipping depth patch");
 			return source;
 		}
 
@@ -1377,91 +1132,6 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 		patched += "    gl_Position.z = gl_Position.z * 0.5 + gl_Position.w * 0.5;\n";
 		patched += "}\n";
 
-		return patched;
-	}
-
-	/**
-	 * Diagnostic: replace the entire vertex shader main() with a minimal MVP transform.
-	 * This eliminates ALL shader pack code (noise functions, material lookups, etc.)
-	 * and tests ONLY: do the UBO matrices + vertex attributes + pipeline work correctly?
-	 *
-	 * Uses: iris_ProjMat, iris_ModelViewMat from UBO (binding 0)
-	 *       iris_Position, iris_Color, iris_UV0, iris_Normal, iris_Entity from vertex attributes
-	 *
-	 * If entities render correctly → shader pack GLSL causes the issue (shaderc miscompilation)
-	 * If panes persist → pipeline/UBO/attribute infrastructure is broken
-	 */
-	private static String patchVertexShaderSimpleTransform(String source) {
-		// Find the LAST "void main()" — handles both depth-patched and non-patched cases.
-		// With depth bypass: finds original main() from shader pack.
-		// Without depth bypass: finds the depth-patch wrapper main().
-		int mainIdx = source.lastIndexOf("void main()");
-		if (mainIdx < 0) {
-			mainIdx = source.lastIndexOf("void main(void)");
-		}
-		if (mainIdx < 0) {
-			Iris.logger.warn("[IrisVulkan] DIAG_SIMPLE_TRANSFORM: could not find main() in vertex shader");
-			return source;
-		}
-
-		String prefix = source.substring(0, mainIdx);
-
-		// Build minimal main() with TRANSPOSED UBO MVP (tests if SPIR-V uses wrong matrix layout)
-		StringBuilder sb = new StringBuilder();
-		sb.append("void main() {\n");
-		sb.append("    // DIAG_SIMPLE_TRANSFORM: Minimal MVP test (ColMajor confirmed by SPIR-V analysis)\n");
-		sb.append("    // If entities render correctly → UBO/pipeline infrastructure works, shader pack code is the issue\n");
-		sb.append("    // If panes persist → vertex attributes or other infrastructure broken\n");
-		sb.append("    gl_Position = iris_ProjMat * iris_ModelViewMat * vec4(iris_Position, 1.0);\n");
-		// Set all output varyings to defaults so fragment shader doesn't read garbage.
-		// Variable names match Complementary Unbound entity shader outputs.
-		sb.append("    texCoord = iris_UV0;\n");
-		sb.append("    glColor = iris_Color;\n");
-		sb.append("    iris_FogFragCoord = 0.0;\n");
-		sb.append("    entityColor = vec4(0.0);\n");
-		sb.append("    absMidCoordPos = vec2(0.0);\n");
-		sb.append("    midCoord = vec2(0.0);\n");
-		sb.append("    signMidCoordPos = vec2(0.0);\n");
-		sb.append("    iris_entityInfo = iris_Entity;\n");
-		sb.append("    lmCoord = vec2(0.0);\n");
-		sb.append("    upVec = vec3(0.0, 1.0, 0.0);\n");
-		sb.append("    sunVec = vec3(0.0, 1.0, 0.0);\n");
-		sb.append("    northVec = vec3(0.0, 0.0, 1.0);\n");
-		sb.append("    eastVec = vec3(1.0, 0.0, 0.0);\n");
-		sb.append("    normal = iris_Normal;\n");
-		sb.append("    iris_vertexColor = iris_Color;\n");
-		sb.append("}\n");
-
-		String patched = prefix + sb.toString();
-		Iris.logger.info("[IrisVulkan] DIAG_SIMPLE_TRANSFORM: replaced main() with minimal MVP transform ({} chars removed)",
-			source.length() - patched.length());
-		return patched;
-	}
-
-	/**
-	 * Diagnostic: patch fragment shader to output flat red, bypassing all lighting.
-	 * This replaces void main() with _iris_vk_fsh_main() and wraps it in a new main()
-	 * that calls the original then overrides FragData outputs.
-	 */
-	private static String patchFragmentShaderFlatColor(String source) {
-		String patched = source.replaceFirst(
-			"void\\s+main\\s*\\(\\s*(void)?\\s*\\)",
-			"void _iris_vk_fsh_main()");
-
-		if (patched.equals(source)) {
-			Iris.logger.warn("[IrisVulkan] DIAG_FLAT_COLOR: could not patch fragment shader");
-			return source;
-		}
-
-		patched += "\n// [Iris Vulkan DIAG] Override fragment output with flat red\n";
-		patched += "void main() {\n";
-		patched += "    _iris_vk_fsh_main();\n";
-		patched += "    iris_FragData0 = vec4(1.0, 0.0, 0.0, 1.0);\n";
-		patched += "    iris_FragData1 = vec4(0.0, 0.0, 0.0, 1.0);\n";
-		patched += "    iris_FragData2 = vec4(0.0, 0.0, 1.0, 1.0);\n";
-		patched += "}\n";
-
-		Iris.logger.info("[IrisVulkan] DIAG_FLAT_COLOR: patched fragment shader to output flat red");
 		return patched;
 	}
 
@@ -1630,12 +1300,6 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 			output.add(line);
 		}
 
-		if (assignedCount > 0 && inputLocationLogCount < 10) {
-			inputLocationLogCount++;
-			Iris.logger.info("[VkPipeline] Assigned {} vertex input locations (format: {} elements, extra: {}):{}",
-				assignedCount, formatNames.size(), nextExtraLocation - formatNames.size(), assignments);
-		}
-
 		return String.join("\n", output);
 	}
 
@@ -1650,65 +1314,6 @@ public class ExtendedShader extends ShaderInstance implements ShaderInstanceInte
 	 * Maps Iris/OptiFine sampler names to VulkanMod texture slot indices.
 	 * VTextureSelector supports indices 0-11.
 	 */
-	/**
-	 * Verifies that our Java-computed std140 UBO offsets match the actual SPIR-V
-	 * bytecode offsets assigned by shaderc. Logs mismatches as warnings.
-	 *
-	 * If offsets don't match, entities will read wrong uniform values from the UBO
-	 * (e.g., reading FogColor where iris_ModelViewMat should be), producing artifacts.
-	 */
-	private static int spirvVerifyCount = 0;
-	private static final int SPIRV_VERIFY_MAX = 10;
-
-	private static void verifySPIRVLayout(String shaderName, ByteBuffer spirv, IrisUniformBuffer uniformBuffer) {
-		if (spirvVerifyCount >= SPIRV_VERIFY_MAX) return;
-		spirvVerifyCount++;
-
-		IrisSPIRVCompiler.SPIRVLayout layout = IrisSPIRVCompiler.parseSPIRVLayout(spirv, shaderName);
-		if (layout == null) {
-			Iris.logger.warn("[SPIRV_VERIFY] Failed to parse SPIR-V layout for {}", shaderName);
-			return;
-		}
-
-		// Log SPIR-V layout
-		Iris.logger.info("[SPIRV_VERIFY] {}\n{}", shaderName, layout.toString());
-
-		// Log Java-computed layout
-		Iris.logger.info("[SPIRV_VERIFY] Java std140 layout for {}:\n{}", shaderName, uniformBuffer.dumpFieldMap());
-
-		// Compare each SPIR-V member against Java offsets
-		boolean anyMismatch = false;
-		Map<String, IrisUniformBuffer.FieldInfo> javaFields = uniformBuffer.getFields();
-
-		for (IrisSPIRVCompiler.SPIRVMember spirvMember : layout.members) {
-			int javaOffset = uniformBuffer.getFieldOffset(spirvMember.name());
-			int spirvOffset = spirvMember.byteOffset();
-
-			if (javaOffset == -1) {
-				Iris.logger.warn("[SPIRV_VERIFY] MISSING: SPIR-V member '{}' (offset={}) has no Java field in {}",
-					spirvMember.name(), spirvOffset, shaderName);
-				anyMismatch = true;
-			} else if (javaOffset != spirvOffset) {
-				Iris.logger.error("[SPIRV_VERIFY] MISMATCH: '{}' Java offset={} vs SPIR-V offset={} in {} (delta={})",
-					spirvMember.name(), javaOffset, spirvOffset, shaderName, spirvOffset - javaOffset);
-				anyMismatch = true;
-			} else {
-				Iris.logger.debug("[SPIRV_VERIFY] OK: '{}' offset={} matches in {}", spirvMember.name(), javaOffset, shaderName);
-			}
-		}
-
-		// Check matrix layout decorations
-		if (layout.hasAnyRowMajor()) {
-			Iris.logger.warn("[SPIRV_VERIFY] WARNING: SPIR-V has RowMajor matrix members in {} - our UBO writes column-major data!", shaderName);
-		}
-
-		if (anyMismatch) {
-			Iris.logger.error("[SPIRV_VERIFY] *** UBO OFFSET MISMATCH DETECTED in {} - this likely causes entity rendering artifacts! ***", shaderName);
-		} else {
-			Iris.logger.info("[SPIRV_VERIFY] All {} SPIR-V members match Java offsets for {}", layout.members.size(), shaderName);
-		}
-	}
-
 	private static int mapSamplerToTextureIndex(String name) {
 		return switch (name) {
 			case "gtexture", "gcolor", "colortex0", "tex", "texture" -> 0;

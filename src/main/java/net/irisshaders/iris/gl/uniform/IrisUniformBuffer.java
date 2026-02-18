@@ -239,6 +239,14 @@ public class IrisUniformBuffer {
 	}
 
 	/**
+	 * Reads back a single float (4 bytes) from the buffer at the given offset.
+	 */
+	public float[] readbackFloat(int byteOffset) {
+		if (byteOffset < 0 || byteOffset + 4 > bufferSize) return null;
+		return new float[] { MemoryUtil.memGetFloat(bufferPtr + byteOffset) };
+	}
+
+	/**
 	 * Dumps the complete field map for diagnostic purposes.
 	 * Returns a formatted string showing every field name, type, offset, and size.
 	 */
