@@ -15,7 +15,7 @@ object Constants {
     const val BETA_VERSION = 1
 
     // LWJGL versions (must match VulkanMod)
-    const val LWJGL_VERSION: String = "3.3.6"
+    const val LWJGL_VERSION: String = "3.3.3"
 }
 
 repositories {
