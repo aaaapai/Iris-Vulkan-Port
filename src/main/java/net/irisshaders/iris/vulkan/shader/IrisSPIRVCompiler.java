@@ -69,9 +69,9 @@ public class IrisSPIRVCompiler {
 		options = shaderc_compile_options_initialize();
 
 		// Target Vulkan 1.2 (matches VulkanMod's SPIRVUtils configuration)
-		shaderc_compile_options_set_target_env(options,
-			shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_1);
-		/*shaderc_compile_options_set_target_env(options, shaderc_env_version_vulkan_1_1, VK12.VK_API_VERSION_1_1);*/
+		/*shaderc_compile_options_set_target_env(options,
+			shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_1);*/
+		shaderc_compile_options_set_target_env(options, shaderc_env_version_vulkan_1_1, VK12.VK_API_VERSION_1_1);
         shaderc_compile_options_set_generate_debug_info(options);
 
 		// Performance optimization (matches VulkanMod)
@@ -86,6 +86,9 @@ public class IrisSPIRVCompiler {
 
 		// Handle combined image samplers (sampler2D) for Vulkan SPIR-V
 		shaderc_compile_options_set_auto_combined_image_sampler(options, true);
+
+		shaderc_compile_options_set_vulkan_rules_relaxed(options, true);
+		shaderc_compile_options_set_target_spirv(options, shaderc_spirv_version_1_1);
 
 		LOGGER.info("Iris SPIR-V compiler initialized (Vulkan 1.1, auto-bind, auto-map)");
 	}
