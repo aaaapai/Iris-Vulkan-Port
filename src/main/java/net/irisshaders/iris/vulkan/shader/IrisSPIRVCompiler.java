@@ -87,7 +87,7 @@ public class IrisSPIRVCompiler {
 		// Handle combined image samplers (sampler2D) for Vulkan SPIR-V
 		shaderc_compile_options_set_auto_combined_image_sampler(options, true);
 
-		shaderc_compile_options_set_vulkan_rules_relaxed(options, true);
+		//shaderc_compile_options_set_vulkan_rules_relaxed(options, true);
 		shaderc_compile_options_set_target_spirv(options, shaderc_spirv_version_1_1);
 
 		LOGGER.info("Iris SPIR-V compiler initialized (Vulkan 1.1, auto-bind, auto-map)");
