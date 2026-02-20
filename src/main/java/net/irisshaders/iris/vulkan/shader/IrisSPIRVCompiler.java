@@ -67,23 +67,25 @@ public class IrisSPIRVCompiler {
 		options = shaderc_compile_options_initialize();
 
 		// Target Vulkan 1.2 (matches VulkanMod's SPIRVUtils configuration)
-		shaderc_compile_options_set_target_env(options,
-			shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_2);
+		/*shaderc_compile_options_set_target_env(options,
+			shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_1);*/
+		shaderc_compile_options_set_target_env(options, shaderc_env_version_vulkan_1_1, VK12.VK_API_VERSION_1_1);
+        shaderc_compile_options_set_generate_debug_info(options);
 
 		// Performance optimization (matches VulkanMod)
-		shaderc_compile_options_set_optimization_level(options,
-			shaderc_optimization_level_performance);
+		/*shaderc_compile_options_set_optimization_level(options,
+			shaderc_optimization_level_performance);*/
 
 		// Auto-assign binding numbers to uniforms/samplers without explicit layout(binding=N)
-		shaderc_compile_options_set_auto_bind_uniforms(options, true);
+		//shaderc_compile_options_set_auto_bind_uniforms(options, true);
 
 		// Auto-assign location numbers to in/out without explicit layout(location=N)
-		shaderc_compile_options_set_auto_map_locations(options, true);
+		//shaderc_compile_options_set_auto_map_locations(options, true);
 
 		// Handle combined image samplers (sampler2D) for Vulkan SPIR-V
 		shaderc_compile_options_set_auto_combined_image_sampler(options, true);
 
-		LOGGER.info("Iris SPIR-V compiler initialized (Vulkan 1.2, auto-bind, auto-map)");
+		LOGGER.info("Iris SPIR-V compiler initialized (Vulkan 1.1, auto-bind, auto-map)");
 	}
 
 	/**
