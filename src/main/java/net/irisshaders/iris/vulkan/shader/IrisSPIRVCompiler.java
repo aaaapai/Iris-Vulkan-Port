@@ -20,6 +20,8 @@ import java.util.regex.Pattern;
 
 import static org.lwjgl.util.shaderc.Shaderc.*;
 
+import org.lwjgl.vulkan.VK12;
+
 /**
  * Iris SPIR-V Compiler - Vulkan Port.
  *
